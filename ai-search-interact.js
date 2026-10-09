@@ -1,0 +1,203 @@
+const $=(s)=>document.querySelector(s);
+const AUDIT_API='https://yqzxoiogkylgbmaftesv.supabase.co/functions/v1/geo-free-audit';
+const FUNNEL_API='https://yqzxoiogkylgbmaftesv.supabase.co/functions/v1/revenue-funnel-event';
+const CHECKOUT_API='https://breakai-geo-checkout.vercel.app/api/geo-checkout';
+const ORDER_CONFIRM_API='https://yqzxoiogkylgbmaftesv.supabase.co/functions/v1/geo-order-confirm';
+const state={url:'',audit:null,inFlight:false,requestSeq:0};
+let checkoutInFlight=false;
+const labels={identity:'会社情報',service_clarity:'サービス説明',crawl_basics:'クロール基本',machine_readable:'構造化データ',answer_ready:'よくある質問・回答情報'};
+function campaign(){const q=new URLSearchParams(location.search);return{source:q.get('utm_source')||'direct',medium:q.get('utm_medium')||'',campaign:q.get('utm_campaign')||'',content:q.get('utm_content')||''};}
+function prospectId(){const id=campaign().content;return /^pr_[0-9a-f]{24}$/.test(id)?id:'';}
+function sessionId(){try{let id=sessionStorage.getItem('breakai_geo_session');if(!id){id=crypto.randomUUID?.()||`${Date.now()}-${Math.random().toString(16).slice(2)}`;sessionStorage.setItem('breakai_geo_session',id);}return id;}catch(_){return'';}}
+function track(event,destination='',metric=null){const c=campaign();return fetch(FUNNEL_API,{method:'POST',headers:{'Content-Type':'application/json'},keepalive:true,body:JSON.stringify({product:'geo',event,destination,metric,...c,path:location.pathname,session:sessionId()})}).then(r=>{if(!r.ok)console.warn('funnel_event_not_recorded',event,r.status);return r;}).catch(e=>{console.warn('funnel_event_failed',event,e?.message||'unknown');return null;});}
+function chat(role,text){const box=$('#guideChat');const el=document.createElement('div');el.className=`guideMsg ${role}`;el.textContent=String(text??'');box.appendChild(el);box.scrollTop=box.scrollHeight;}
+function setReply(text){const el=$('#guideReply');if(el)el.textContent=String(text??'');}
+function showGuideError(text){const el=$('#guideError'),input=$('#guideQuestion');if(el){el.textContent=String(text||'');el.classList.toggle('hidden',!text);}if(input)input.setAttribute('aria-invalid',text?'true':'false');}
+function validUrl(text){const raw=String(text||'').trim();if(!raw)return'';const candidate=/^[a-z][a-z0-9+.-]*:\/\//i.test(raw)?raw:`https://${raw}`;try{const u=new URL(candidate);const host=u.hostname||'';const publicLike=host.includes('.')&&!host.startsWith('.')&&!host.endsWith('.');return /^https?:$/.test(u.protocol)&&publicLike?u.href:''}catch(_){return''}}
+function answerFaq(t){t=String(t||'');if(/料金|価格|有料/.test(t))return'詳細版はパイロット価格19,800円の単発診断です。OpenAI・Gemini・Perplexityの3系統×12問＝36観測で競合・引用元・誤情報・AI間差まで確認します。';if(/競合|比較/.test(t))return'無料版はWebサイト側の準備度です。詳細版ではOpenAI API・Gemini API・Perplexity APIの同一質問観測で競合比較まで行います。消費者向けChatGPT画面そのものの再現ではありません。';if(/何が分か|わかる|内容/.test(t))return'無料で、会社情報・サービス説明・クロール基本・構造化データ・よくある質問・回答情報の5項目と、優先改善点が分かります。';return'';}
+function clear(el){while(el.firstChild)el.removeChild(el.firstChild);}
+function renderComponents(components){
+  const root=$('#auditMetrics'); clear(root);
+  Object.entries(components||{}).forEach(([k,raw])=>{
+    const available=raw!==null&&raw!==undefined&&raw!==''&&Number.isFinite(Number(raw));
+    const safe=available?Math.max(0,Math.min(20,Number(raw))):0; const pct=safe*5;
+    const card=document.createElement('div'); card.className='auditMetric';
+    if(!available)card.classList.add('isUnavailable');
+    const top=document.createElement('div');
+    const name=document.createElement('b'); name.textContent=labels[k]||String(k);
+    const score=document.createElement('strong'); score.textContent=available?`${safe}/20`:'--/20';
+    top.append(name,score);
+    const bar=document.createElement('span'); const fill=document.createElement('i'); fill.style.width=`${pct}%`; bar.appendChild(fill);
+    card.append(top,bar); root.appendChild(card);
+  });
+}
+function renderRecommendations(recs,scored){
+  const root=$('#auditRecommendations'); clear(root);
+  const items=Array.isArray(recs)?recs:[];
+  if(items.length){
+    items.forEach((value,index)=>{
+      const li=document.createElement('li'); const num=document.createElement('b'); const text=document.createElement('span');
+      num.textContent=String(index+1); text.textContent=String(value??''); li.append(num,text); root.appendChild(li);
+    });
+    return;
+  }
+  const li=document.createElement('li'); const text=document.createElement('span');
+  text.textContent=scored?'今回の取得範囲では優先改善候補を特定できませんでした。':'取得できない項目があるため改善候補を判定していません。URLの公開状態を確認して再診断してください。';
+  li.appendChild(text); root.appendChild(li);
+}
+function syncSticky(){const sticky=document.querySelector('.geoMobileSticky');if(!sticky)return;const scored=state.audit?.score!=null&&Number.isFinite(Number(state.audit.score));const overlapsEnd=[document.querySelector('.geoFinalCta'),document.querySelector('footer')].some(el=>{if(!el)return false;const r=el.getBoundingClientRect();return r.top<window.innerHeight&&r.bottom>0;});sticky.classList.toggle('isPaidReady',scored);sticky.classList.toggle('isVisible',(window.scrollY>620||scored)&&!overlapsEnd);}
+function renderAudit(d){
+  state.audit=d; $('#auditResult').classList.remove('hidden');
+  const paidUpsell=document.querySelector('.paidUpsell'); if(paidUpsell)paidUpsell.classList.toggle('hidden',d.score==null);
+  const scored=d.score!=null && Number.isFinite(Number(d.score));
+  $('#auditScore').textContent=scored?`${Number(d.score)}/100`:'--';
+  $('#auditGrade').textContent=scored?String(d.grade||'結果を確認してください'):'採点できませんでした';
+  $('#auditDomain').textContent=String(d.final_url||state.url||'');
+  renderComponents(d.components); renderRecommendations(d.recommendations,scored);
+  $('#auditDisclosure').textContent=String(d.disclosure||'');
+  syncSticky();
+  const reduced=window.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
+  $('#auditResult').scrollIntoView({behavior:reduced?'auto':'smooth',block:'start'});
+}
+async function runAudit(text){
+  const u=validUrl(text); if(!u){showGuideError('会社サイトのURLを正しく入力してください。例：breakai-labs.co.jp');$('#guideQuestion')?.focus();return;}
+  showGuideError('');
+  if(state.inFlight){setReply('診断中です。完了してから次のURLをお試しください。');return;}
+  state.inFlight=true;const requestId=++state.requestSeq;
+  state.url=u;state.audit=null;$('#auditResult')?.classList.add('hidden');syncSticky();track('page_view','geo_diagnostic_start');chat('user',u);chat('ai','公開Webを取得して5項目を確認しています。少しお待ちください。');
+  const b=$('#guideAskBtn'); b.disabled=true;b.textContent='診断中…';
+  setReply('会社情報・サービス説明・クロール・構造化データ・よくある質問を確認中です。');
+  const controller=new AbortController();const timer=setTimeout(()=>controller.abort(),15000);
+  try{
+    const r=await fetch(AUDIT_API,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({url:u}),signal:controller.signal});
+    const d=await r.json();if(!r.ok)throw new Error(d.detail||d.error||'診断に失敗しました');
+    if(requestId!==state.requestSeq)return;
+    $('#urlSummary').textContent=`URL：${String(d.final_url||u)}`;
+    const scored=d.score!=null && Number.isFinite(Number(d.score));
+    chat('ai',scored?`診断完了です。準備度は ${Number(d.score)}/100、${String(d.grade||'結果を確認してください')} です。下に内訳と優先改善点を表示しました。`:'今回は安全に取得できなかったため採点していません。公開状態を確認して再診断してください。');
+    renderAudit(d);
+    if(scored)track('free_result','geo_free',Number(d.score));
+    setReply(scored?'無料結果を確認してください。詳細版では3AI×12問の実観測まで行います。':'今回は有効な診断結果として記録していません。URLを確認して再度お試しください。');
+  }catch(e){
+    track('page_view',e.name==='AbortError'?'geo_diagnostic_timeout':'geo_diagnostic_error');
+    chat('ai',e.name==='AbortError'?'診断に時間がかかっています。時間をおいて、もう一度お試しください。':`診断できませんでした：${e.message}`);
+    setReply('URLの公開状態を確認して、もう一度お試しください。');
+  }finally{clearTimeout(timer);if(requestId===state.requestSeq){state.inFlight=false;b.disabled=false;b.textContent='無料で確認する →';}}
+}
+async function openPaidCheckout(e){
+  e?.preventDefault?.();
+  if(checkoutInFlight)return;
+  checkoutInFlight=true;
+  const a=e?.currentTarget;
+  const originalHtml=a?.innerHTML||'';
+  if(a){a.setAttribute('aria-disabled','true');a.textContent='決済画面を準備中…';}
+  track('paid_click','geo_intro_19800');
+  setReply('19,800円の詳細版の決済画面を準備しています。決済前に会社サイトURL・業種・主なサービスを確認します。');
+  const controller=new AbortController();
+  const timer=setTimeout(()=>controller.abort(),12000);
+  try{
+    const pid=prospectId();
+    const r=await fetch(CHECKOUT_API,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(pid?{prospect_id:pid}:{}),signal:controller.signal});
+    const d=await r.json().catch(()=>({}));
+    if(!r.ok)throw new Error(d.error||'CHECKOUT_REQUEST_FAILED');
+    const u=new URL(String(d.checkout_url||''));
+    if(u.protocol!=='https:'||u.hostname!=='checkout.stripe.com')throw new Error('INVALID_CHECKOUT_URL');
+    location.assign(u.href);
+  }catch(err){
+    console.error('geo_checkout_failed',err);
+    setReply('決済画面を開けませんでした。時間をおいてもう一度お試しください。料金は発生していません。');
+    showGuideError('決済画面を開けませんでした。時間をおいてもう一度お試しください。');
+    checkoutInFlight=false;
+    if(a){a.removeAttribute('aria-disabled');a.innerHTML=originalHtml;}
+  }finally{
+    clearTimeout(timer);
+  }
+}
+async function showCheckoutReturn(){
+  const q=new URLSearchParams(location.search);
+  const checkout=String(q.get('checkout')||'');
+  if(checkout!=='success'&&checkout!=='cancel')return;
+  const session=String(q.get('session_id')||'');
+  const validSession=/^cs_live_[A-Za-z0-9_]+$/.test(session);
+  track('checkout_return',checkout,checkout==='success'?1:0);
+
+  const box=document.createElement('section');
+  box.setAttribute('role',checkout==='success'?'status':'alert');
+  box.style.cssText='width:min(980px,calc(100% - 28px));margin:18px auto 0;padding:20px 22px;border-radius:18px;border:1px solid '+(checkout==='success'?'rgba(77,225,174,.38)':'rgba(255,188,105,.32)')+';background:'+(checkout==='success'?'linear-gradient(135deg,rgba(10,78,62,.82),rgba(6,30,42,.94))':'linear-gradient(135deg,rgba(86,54,18,.72),rgba(28,24,22,.94))')+';color:#eefcff;box-shadow:0 20px 60px rgba(0,0,0,.2)';
+
+  const title=document.createElement('h2');
+  title.style.cssText='margin:0 0 8px;font-size:22px';
+  const body=document.createElement('p');
+  body.style.cssText='margin:0;color:#cfe2e8;line-height:1.75;font-size:13px';
+
+  if(checkout==='cancel'){
+    title.textContent='決済は完了していません';
+    body.textContent='Stripeの決済画面でキャンセルされました。料金は発生していません。必要なときに、もう一度「詳細版を申し込む」から進めてください。';
+    box.append(title,body);
+  }else{
+    title.textContent='お申し込みを受け付けました';
+    body.textContent='Stripeの決済完了画面から戻りました。支払いを確認して受付を記録しています。';
+    box.append(title,body);
+
+    const ref=document.createElement('small');
+    ref.style.cssText='display:block;margin-top:10px;color:#84d9c0';
+    ref.textContent=validSession?'受付識別子：…'+session.slice(-8):'受付情報を確認中です';
+    box.appendChild(ref);
+
+    if(validSession){
+      try{
+        const controller=new AbortController();
+        const timer=setTimeout(()=>controller.abort(),12000);
+        const r=await fetch(ORDER_CONFIRM_API,{
+          method:'POST',
+          headers:{'Content-Type':'application/json'},
+          body:JSON.stringify({session_id:session}),
+          signal:controller.signal
+        });
+        clearTimeout(timer);
+        const d=await r.json().catch(()=>({}));
+        if(r.ok&&d?.status==='RECORDED'){
+          title.textContent='決済を確認し、受付を記録しました';
+          body.textContent='会社サイトURL・業種・主なサービスを受付済みです。内容を確認し、必要情報の確認完了後、原則3営業日以内にAI検索実測レポートをメールでお送りします。';
+          ref.textContent='受付ID：'+String(d.order_id||'').slice(0,8)+'…';
+        }else{
+          body.textContent='決済完了画面から戻りました。受付情報は自動照合でも確認します。画面を閉じても問題ありません。';
+        }
+      }catch(_){
+        body.textContent='決済完了画面から戻りました。受付情報は自動照合でも確認します。画面を閉じても問題ありません。';
+      }
+    }
+  }
+
+  const top=document.querySelector('.geoTopbar');
+  if(top?.parentNode)top.parentNode.insertBefore(box,top.nextSibling);
+  else document.body.prepend(box);
+
+  q.delete('checkout');
+  q.delete('session_id');
+  const qs=q.toString();
+  history.replaceState({},'',location.pathname+(qs?'?'+qs:'')+location.hash);
+  setTimeout(()=>box.scrollIntoView({behavior:window.matchMedia?.('(prefers-reduced-motion: reduce)').matches?'auto':'smooth',block:'start'}),50);
+}
+function handle(text){
+  const t=String(text||'').trim();if(!t){showGuideError('会社サイトのURLを入力してください。例：breakai-labs.co.jp');$('#guideQuestion')?.focus();return;}
+  const u=validUrl(t);if(u){showGuideError('');runAudit(u);return;}
+  const faq=answerFaq(t);if(faq){showGuideError('');chat('user',t);chat('ai',faq);return;}
+  showGuideError('会社サイトのURLを正しく入力してください。例：breakai-labs.co.jp');$('#guideQuestion')?.focus();
+}
+window.addEventListener('DOMContentLoaded',()=>{
+  track('page_view','geo_landing');
+  showCheckoutReturn();
+  window.addEventListener('scroll',syncSticky,{passive:true});
+  syncSticky();
+  if(window.matchMedia?.('(prefers-reduced-motion: reduce)').matches){
+    document.querySelectorAll('video[autoplay]').forEach(v=>{v.pause();v.removeAttribute('autoplay');});
+  }
+  $('#guideAskBtn')?.addEventListener('click',()=>handle($('#guideQuestion')?.value));
+  $('#guideQuestion')?.addEventListener('keydown',e=>{if(e.key==='Enter'){e.preventDefault();handle(e.currentTarget.value);}});
+  $('#guideQuestion')?.addEventListener('input',()=>showGuideError(''));
+  document.querySelectorAll('a[href="#free-diagnosis"]').forEach(a=>a.addEventListener('click',()=>setTimeout(()=>$('#guideQuestion')?.focus({preventScroll:true}),0)));
+  document.querySelectorAll('[data-guide]').forEach(b=>b.addEventListener('click',()=>handle(b.dataset.guide)));
+  document.querySelectorAll('[data-sample-cta]').forEach(a=>a.addEventListener('click',()=>track('sample_click','geo_evidence_sample')));
+  document.querySelectorAll('[data-paid-cta]').forEach(a=>a.addEventListener('click',openPaidCheckout));
+});
